@@ -1,4 +1,4 @@
-import { Injectable, UnauthorizedException } from '@nestjs/common';
+import { Injectable, UnauthorizedException, Logger } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { OAuth2Client } from 'google-auth-library';
 import { ConfigService } from '@nestjs/config';
@@ -20,11 +20,15 @@ export class AuthService {
   }
 
   async googleLogin(idToken: string): Promise<AuthResponseDto> {
+    const logger = new Logger('AuthService');
+    logger.log(`googleLogin called, idToken length: ${idToken?.length}`);
+    logger.log(`GOOGLE_CLIENT_ID from env: ${this.configService.get('GOOGLE_CLIENT_ID')}`);
     try {
       const ticket = await this.googleClient.verifyIdToken({
         idToken,
         audience: this.configService.get('GOOGLE_CLIENT_ID'),
       });
+      logger.log('Token verified successfully');
 
       const payload = ticket.getPayload();
       if (!payload) {
@@ -32,6 +36,7 @@ export class AuthService {
       }
 
       const { sub: googleId, email, name, picture } = payload;
+      logger.log(`Google user: ${email}, googleId: ${googleId}`);
 
       const user = await this.usersService.updateOrCreate(googleId, {
         googleId,
@@ -56,7 +61,9 @@ export class AuthService {
         },
       };
     } catch (error) {
-      throw new UnauthorizedException('Invalid Google authentication');
+      logger.error(`Google auth error: ${error.message}`);
+      logger.error(`Error details: ${JSON.stringify(error.response?.data || error)}`);
+      throw new UnauthorizedException(`Invalid Google authentication: ${error.message}`);
     }
   }
 
