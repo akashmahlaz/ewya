@@ -1,4 +1,4 @@
-import { Injectable, HttpException, HttpStatus } from '@nestjs/common';
+import { Injectable, HttpException, HttpStatus, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
@@ -25,6 +25,7 @@ interface AiSearchResult {
 
 @Injectable()
 export class SearchService {
+  private readonly logger = new Logger(SearchService.name);
   private openaiApiKey: string;
   private rocketreachApiKey: string;
 
@@ -40,28 +41,46 @@ export class SearchService {
   }
 
   async searchContacts(userId: string, query: string): Promise<SearchResultDto> {
+    this.logger.log(`========== SEARCH START ==========`);
+    this.logger.log(`User: ${userId} | Query: "${query}"`);
+    this.logger.log(`OpenAI key present: ${!!this.openaiApiKey} (len=${this.openaiApiKey?.length})`);
+    this.logger.log(`RocketReach key present: ${!!this.rocketreachApiKey} (len=${this.rocketreachApiKey?.length})`);
     try {
       // Increment API call count
       await this.usersService.incrementApiCallCount(userId);
 
       // Step 1: Parse query with OpenAI
+      this.logger.log(`[Step 1] Parsing query with OpenAI...`);
       const aiResult = await this.parseQueryWithAI(query);
+      this.logger.log(`[Step 1 DONE] AI interpretation: ${aiResult.interpretation}`);
+      this.logger.log(`[Step 1 DONE] Target profiles count: ${aiResult.targetProfiles?.length}`);
+      this.logger.log(`[Step 1 DONE] Target profiles: ${JSON.stringify(aiResult.targetProfiles, null, 2)}`);
 
       // Step 2: Enrich with RocketReach
+      this.logger.log(`[Step 2] Enriching with RocketReach...`);
       const contacts = await this.enrichContactsWithRocketReach(aiResult);
+      this.logger.log(`[Step 2 DONE] Got ${contacts.length} contacts from RocketReach`);
+      if (contacts.length > 0) {
+        this.logger.log(`[Step 2 DONE] First contact: ${JSON.stringify(contacts[0])}`);
+      }
 
       // Step 3: Format results
       const formattedMessage = this.formatResults(aiResult, contacts);
+      this.logger.log(`[Step 3] Response message: ${formattedMessage}`);
 
       // Save search history
       await this.saveSearchHistory(userId, query, contacts.length);
 
+      this.logger.log(`========== SEARCH END (${contacts.length} results) ==========`);
       return {
         contacts,
         message: formattedMessage,
         totalResults: contacts.length,
       };
     } catch (error) {
+      this.logger.error(`========== SEARCH FAILED ==========`);
+      this.logger.error(`Error: ${error.message}`);
+      this.logger.error(`Stack: ${error.stack}`);
       throw new HttpException(
         'Search failed: ' + error.message,
         HttpStatus.INTERNAL_SERVER_ERROR,
@@ -77,32 +96,40 @@ Your task is to:
 2. Extract key profile requirements (titles, companies, industries, locations)
 3. Return structured JSON data
 
-Return ONLY valid JSON in this exact format:
+Return ONLY valid JSON in this exact format (no markdown, no code fences):
 {
-  "interpretation": "Brief summary of what the user is looking for",
+  "interpretation": "A short phrase describing the search target, e.g. 'real estate agents in Dubai'",
   "targetProfiles": [
     {
-      "name": "example name if specific, otherwise empty",
-      "role": "job title/role keywords",
-      "company": "company name if specified",
-      "location": "location if specified",
-      "industry": "industry if specified",
+      "name": "",
+      "role": "job title/role keywords like 'Real Estate Agent'",
+      "company": "company name if specified, otherwise empty string",
+      "location": "location if specified like 'Dubai, UAE'",
+      "industry": "industry if specified like 'Real Estate'",
       "relevanceScore": 95
     }
   ],
   "searchStrategy": "Brief search strategy description"
-}`;
+}
+
+IMPORTANT:
+- "interpretation" should be a SHORT noun phrase (not a full sentence), e.g. "real estate agents in Dubai" not "The user is looking for real estate agents in Dubai"
+- Generate 1-3 target profiles with varied role keywords to maximize search results
+- Always include location when mentioned
+- Always include industry when it can be inferred`;
 
     try {
+      this.logger.log(`[OpenAI] Sending request with model: gpt-5.2-pro (Responses API)`);
+      this.logger.log(`[OpenAI] Instructions length: ${systemPrompt.length}`);
+      this.logger.log(`[OpenAI] User query: "${query}"`);
+
       const response = await axios.post(
-        'https://api.openai.com/v1/chat/completions',
+        'https://api.openai.com/v1/responses',
         {
-          model: 'gpt-4',
-          messages: [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: query },
-          ],
-          temperature: 0.3,
+          model: 'gpt-5.2-pro',
+          instructions: systemPrompt,
+          input: query,
+          reasoning: { effort: 'medium' },
         },
         {
           headers: {
@@ -112,11 +139,30 @@ Return ONLY valid JSON in this exact format:
         },
       );
 
-      const content = response.data.choices[0].message.content;
-      return JSON.parse(content);
+      // Extract text from Responses API output
+      let content = '';
+      for (const item of response.data.output) {
+        if (item.type === 'message' && item.content) {
+          for (const contentItem of item.content) {
+            if (contentItem.type === 'output_text') {
+              content += contentItem.text;
+            }
+          }
+        }
+      }
+
+      this.logger.log(`[OpenAI] Raw response: ${content}`);
+      this.logger.log(`[OpenAI] Model used: ${response.data.model}`);
+      this.logger.log(`[OpenAI] Output items: ${response.data.output?.length}`);
+
+      const parsed = JSON.parse(content);
+      this.logger.log(`[OpenAI] Parsed successfully - ${parsed.targetProfiles?.length} target profiles`);
+      return parsed;
     } catch (error) {
-      console.error('OpenAI API error:', error.response?.data || error.message);
-      throw new Error('Failed to parse query with AI');
+      this.logger.error(`[OpenAI] API ERROR: ${error.message}`);
+      this.logger.error(`[OpenAI] Response data: ${JSON.stringify(error.response?.data)}`);
+      this.logger.error(`[OpenAI] Status: ${error.response?.status}`);
+      throw new Error('Failed to parse query with AI: ' + (error.response?.data?.error?.message || error.message));
     }
   }
 
@@ -124,7 +170,7 @@ Return ONLY valid JSON in this exact format:
     aiResult: AiSearchResult,
   ): Promise<ContactDto[]> {
     if (!this.rocketreachApiKey) {
-      // Return mock data if no API key
+      this.logger.warn(`[RocketReach] No API key configured! Returning mock data.`);
       return aiResult.targetProfiles.map((profile, index) => ({
         id: `mock-${index}`,
         name: profile.name || `Professional ${index + 1}`,
@@ -146,16 +192,21 @@ Return ONLY valid JSON in this exact format:
     try {
       const searchQueries = aiResult.targetProfiles.map((profile) => ({
         query: {
-          current_employer: profile.company || undefined,
-          current_title: profile.role || undefined,
-          location: profile.location || undefined,
+          current_employer: profile.company ? [profile.company] : undefined,
+          current_title: profile.role ? [profile.role] : undefined,
+          location: profile.location ? [profile.location] : undefined,
         },
       }));
 
       const contacts: ContactDto[] = [];
 
-      for (const searchQuery of searchQueries) {
+      this.logger.log(`[RocketReach] Processing ${searchQueries.length} search queries`);
+
+      for (let i = 0; i < searchQueries.length; i++) {
+        const searchQuery = searchQueries[i];
         try {
+          this.logger.log(`[RocketReach] Query ${i + 1}/${searchQueries.length}: ${JSON.stringify(searchQuery.query)}`);
+
           const response = await axios.post(
             'https://api.rocketreach.co/v2/api/search',
             {
@@ -170,19 +221,30 @@ Return ONLY valid JSON in this exact format:
             },
           );
 
+          this.logger.log(`[RocketReach] Response status: ${response.status}`);
+          this.logger.log(`[RocketReach] Response keys: ${Object.keys(response.data)}`);
+          this.logger.log(`[RocketReach] Profiles count: ${response.data.profiles?.length || 0}`);
+          this.logger.log(`[RocketReach] Pagination: ${JSON.stringify(response.data.pagination || {})}`);
+
           const profiles = response.data.profiles || [];
           const mappedContacts = profiles.map((profile: any) =>
             this.mapRocketReachProfile(profile),
           );
           contacts.push(...mappedContacts);
+
+          this.logger.log(`[RocketReach] Mapped ${mappedContacts.length} contacts from query ${i + 1}`);
         } catch (error) {
-          console.error('RocketReach API error:', error.response?.data || error.message);
+          this.logger.error(`[RocketReach] API ERROR for query ${i + 1}: ${error.message}`);
+          this.logger.error(`[RocketReach] Status: ${error.response?.status}`);
+          this.logger.error(`[RocketReach] Response: ${JSON.stringify(error.response?.data)}`);
         }
       }
 
+      this.logger.log(`[RocketReach] Total contacts found: ${contacts.length}`);
       return contacts;
     } catch (error) {
-      console.error('RocketReach enrichment error:', error);
+      this.logger.error(`[RocketReach] Enrichment error: ${error.message}`);
+      this.logger.error(`[RocketReach] Stack: ${error.stack}`);
       // Fallback to mock data
       return this.enrichContactsWithRocketReach({ ...aiResult });
     }
@@ -210,7 +272,7 @@ Return ONLY valid JSON in this exact format:
   private formatResults(aiResult: AiSearchResult, contacts: ContactDto[]): string {
     const count = contacts.length;
     if (count === 0) {
-      return `I understand you're looking for ${aiResult.interpretation}, but I couldn't find any matching professionals at the moment. Try refining your search with more specific criteria.`;
+      return `I searched for "${aiResult.interpretation}" but couldn't find any matching professionals at the moment. Try refining your search with more specific criteria.`;
     }
 
     return `I found ${count} professional${count > 1 ? 's' : ''} matching your search. ${aiResult.interpretation}. Here are the top results with verified contact information.`;

@@ -1,4 +1,4 @@
-import { Injectable, HttpException, HttpStatus } from '@nestjs/common';
+import { Injectable, HttpException, HttpStatus, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import axios from 'axios';
 import { ContactsService } from '../contacts/contacts.service';
@@ -6,6 +6,7 @@ import { GenerateFollowUpDto, FollowUpResponseDto, FollowUpChannel } from './dto
 
 @Injectable()
 export class FollowUpService {
+  private readonly logger = new Logger(FollowUpService.name);
   private openaiApiKey: string;
 
   constructor(
@@ -29,15 +30,16 @@ export class FollowUpService {
       const systemPrompt = this.getSystemPrompt(dto.channel);
       const userPrompt = this.buildUserPrompt(contact, dto.context, dto.channel);
 
+      this.logger.log(`[FollowUp] Sending request with model: gpt-5.2-pro (Responses API)`);
+      this.logger.log(`[FollowUp] Channel: ${dto.channel} | Contact: ${contact.name}`);
+
       const response = await axios.post(
-        'https://api.openai.com/v1/chat/completions',
+        'https://api.openai.com/v1/responses',
         {
-          model: 'gpt-4',
-          messages: [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: userPrompt },
-          ],
-          temperature: 0.7,
+          model: 'gpt-5.2-pro',
+          instructions: systemPrompt,
+          input: userPrompt,
+          reasoning: { effort: 'low' },
         },
         {
           headers: {
@@ -47,15 +49,33 @@ export class FollowUpService {
         },
       );
 
-      const content = response.data.choices[0].message.content;
+      // Extract text from Responses API output
+      let content = '';
+      for (const item of response.data.output) {
+        if (item.type === 'message' && item.content) {
+          for (const contentItem of item.content) {
+            if (contentItem.type === 'output_text') {
+              content += contentItem.text;
+            }
+          }
+        }
+      }
+
+      this.logger.log(`[FollowUp] OpenAI model used: ${response.data.model}`);
+      this.logger.log(`[FollowUp] Output items: ${response.data.output?.length}`);
+      this.logger.log(`[FollowUp] Raw response length: ${content.length}`);
+
       const result = this.parseFollowUpResponse(content, dto.channel);
 
+      this.logger.log(`[FollowUp] Generated successfully for channel: ${dto.channel}`);
       return {
         ...result,
         channel: dto.channel,
       };
     } catch (error) {
-      console.error('Follow-up generation error:', error.response?.data || error.message);
+      this.logger.error(`[FollowUp] ERROR: ${error.message}`);
+      this.logger.error(`[FollowUp] OpenAI response: ${JSON.stringify(error.response?.data)}`);
+      this.logger.error(`[FollowUp] Status: ${error.response?.status}`);
       throw new HttpException(
         'Failed to generate follow-up message',
         HttpStatus.INTERNAL_SERVER_ERROR,
