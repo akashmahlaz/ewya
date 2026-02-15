@@ -136,6 +136,7 @@ IMPORTANT:
             'Authorization': `Bearer ${this.openaiApiKey}`,
             'Content-Type': 'application/json',
           },
+          timeout: 30000, // 30s timeout
         },
       );
 
@@ -151,9 +152,13 @@ IMPORTANT:
         }
       }
 
-      this.logger.log(`[OpenAI] Raw response: ${content}`);
       this.logger.log(`[OpenAI] Model used: ${response.data.model}`);
-      this.logger.log(`[OpenAI] Output items: ${response.data.output?.length}`);
+
+      // Strip markdown code fences if present
+      content = content.trim();
+      if (content.startsWith('```')) {
+        content = content.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+      }
 
       const parsed = JSON.parse(content);
       this.logger.log(`[OpenAI] Parsed successfully - ${parsed.targetProfiles?.length} target profiles`);
@@ -218,6 +223,7 @@ IMPORTANT:
                 'Api-Key': this.rocketreachApiKey,
                 'Content-Type': 'application/json',
               },
+              timeout: 15000, // 15s timeout
             },
           );
 
@@ -244,29 +250,83 @@ IMPORTANT:
       return contacts;
     } catch (error) {
       this.logger.error(`[RocketReach] Enrichment error: ${error.message}`);
-      this.logger.error(`[RocketReach] Stack: ${error.stack}`);
-      // Fallback to mock data
-      return this.enrichContactsWithRocketReach({ ...aiResult });
+      // Fallback to mock data instead of recursive call
+      return aiResult.targetProfiles.map((profile, index) => ({
+        id: `fallback-${Date.now()}-${index}`,
+        name: profile.name || `Professional ${index + 1}`,
+        title: profile.role,
+        company: profile.company,
+        location: profile.location,
+        industry: profile.industry,
+        emails: [],
+        phones: [],
+        linkedInUrl: '',
+        profileImageUrl: '',
+        relevanceScore: profile.relevanceScore || 50,
+        summary: `${profile.role || 'Professional'} at ${profile.company || 'Unknown'}`,
+        firstName: '',
+        lastName: '',
+      }));
     }
   }
 
   private mapRocketReachProfile(profile: any): ContactDto {
+    // RocketReach may return emails/phones as objects [{email, type}, ...] or strings
+    const emails = this.extractStringArray(profile.emails || profile.telesign_emails || []);
+    const phones = this.extractStringArray(profile.phones || profile.telesign_phones || []);
+
     return {
       id: profile.id?.toString() || `rr-${Date.now()}-${Math.random()}`,
-      name: profile.name || '',
+      name: profile.name || [profile.first_name, profile.last_name].filter(Boolean).join(' ') || '',
       firstName: profile.first_name || '',
       lastName: profile.last_name || '',
-      title: profile.current_title || '',
-      company: profile.current_employer || '',
-      location: profile.location || '',
+      title: profile.current_title || profile.title || '',
+      company: profile.current_employer || profile.employer || '',
+      location: profile.location?.trim() || [profile.city, profile.region, profile.country].filter(Boolean).join(', ') || '',
       industry: profile.industry || '',
-      emails: profile.emails || [],
-      phones: profile.phones || [],
-      linkedInUrl: profile.linkedin_url || '',
-      profileImageUrl: profile.profile_pic || '',
-      relevanceScore: 90,
-      summary: `${profile.current_title || 'Professional'} at ${profile.current_employer || 'Unknown Company'}`,
+      emails,
+      phones,
+      linkedInUrl: profile.linkedin_url || profile.li_url || '',
+      profileImageUrl: profile.profile_pic || profile.photo_url || '',
+      relevanceScore: profile.relevance || 90,
+      summary: this.buildProfileSummary(profile),
     };
+  }
+
+  /**
+   * Safely extract string[] from RocketReach data which may be:
+   * - string[]: ["email@test.com"]
+   * - object[]: [{email: "...", type: "..."}] or [{number: "...", type: "..."}]
+   */
+  private extractStringArray(data: any): string[] {
+    if (!data || !Array.isArray(data)) return [];
+    return data
+      .map((item: any) => {
+        if (typeof item === 'string') return item;
+        if (typeof item === 'object' && item !== null) {
+          if (item.email) return item.email;
+          if (item.number) return item.number;
+          if (item.value) return item.value;
+          if (item.raw_number) return item.raw_number;
+        }
+        return null;
+      })
+      .filter((v: any): v is string => typeof v === 'string' && v.length > 0);
+  }
+
+  private buildProfileSummary(profile: any): string {
+    const parts: string[] = [];
+    const title = profile.current_title || profile.title || 'Professional';
+    const company = profile.current_employer || profile.employer || '';
+    const location = profile.location || [profile.city, profile.region].filter(Boolean).join(', ') || '';
+    const industry = profile.industry || '';
+
+    parts.push(title);
+    if (company) parts.push(`at ${company}`);
+    if (location) parts.push(`in ${location}`);
+    if (industry) parts.push(`| ${industry}`);
+
+    return parts.join(' ');
   }
 
   private formatResults(aiResult: AiSearchResult, contacts: ContactDto[]): string {

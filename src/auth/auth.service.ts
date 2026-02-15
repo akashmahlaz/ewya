@@ -22,7 +22,6 @@ export class AuthService {
   async googleLogin(idToken: string): Promise<AuthResponseDto> {
     const logger = new Logger('AuthService');
     logger.log(`googleLogin called, idToken length: ${idToken?.length}`);
-    logger.log(`GOOGLE_CLIENT_ID from env: ${this.configService.get('GOOGLE_CLIENT_ID')}`);
     try {
       const ticket = await this.googleClient.verifyIdToken({
         idToken,

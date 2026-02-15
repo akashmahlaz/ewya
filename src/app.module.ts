@@ -9,6 +9,7 @@ import { UsersModule } from './users/users.module';
 import { ContactsModule } from './contacts/contacts.module';
 import { SearchModule } from './search/search.module';
 import { FollowUpModule } from './followup/followup.module';
+import { ConversationsModule } from './conversations/conversations.module';
 
 @Module({
   imports: [
@@ -38,6 +39,7 @@ import { FollowUpModule } from './followup/followup.module';
     ContactsModule,
     SearchModule,
     FollowUpModule,
+    ConversationsModule,
   ],
   controllers: [AppController],
   providers: [AppService],

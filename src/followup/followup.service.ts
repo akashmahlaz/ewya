@@ -2,7 +2,7 @@ import { Injectable, HttpException, HttpStatus, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import axios from 'axios';
 import { ContactsService } from '../contacts/contacts.service';
-import { GenerateFollowUpDto, FollowUpResponseDto, FollowUpChannel } from './dto/followup.dto';
+import { GenerateFollowUpDto, FollowUpResponseDto, FollowUpChannel, BatchFollowUpDto, BatchFollowUpResponseDto } from './dto/followup.dto';
 
 @Injectable()
 export class FollowUpService {
@@ -167,5 +167,77 @@ Create a personalized, professional message appropriate for this channel.`;
         body: content,
       };
     }
+  }
+
+  async generateBatchFollowUp(
+    userId: string,
+    dto: BatchFollowUpDto,
+  ): Promise<BatchFollowUpResponseDto> {
+    const results: BatchFollowUpResponseDto['results'] = [];
+
+    for (const contactInfo of dto.contacts) {
+      try {
+        const systemPrompt = this.getSystemPrompt(dto.channel);
+        const userPrompt = `Generate a ${dto.channel.toLowerCase()} message to follow up with:
+
+Contact Details:
+- Name: ${contactInfo.contactName}
+- Title: ${contactInfo.title || 'N/A'}
+- Company: ${contactInfo.company || 'N/A'}
+
+Context/Purpose: ${dto.context}
+
+Create a personalized, professional message appropriate for this channel.`;
+
+        const response = await axios.post(
+          'https://api.openai.com/v1/responses',
+          {
+            model: 'gpt-5.2-pro',
+            instructions: systemPrompt,
+            input: userPrompt,
+            reasoning: { effort: 'low' },
+          },
+          {
+            headers: {
+              'Authorization': `Bearer ${this.openaiApiKey}`,
+              'Content-Type': 'application/json',
+            },
+          },
+        );
+
+        let content = '';
+        for (const item of response.data.output) {
+          if (item.type === 'message' && item.content) {
+            for (const contentItem of item.content) {
+              if (contentItem.type === 'output_text') {
+                content += contentItem.text;
+              }
+            }
+          }
+        }
+
+        const result = this.parseFollowUpResponse(content, dto.channel);
+        results.push({
+          contactId: contactInfo.contactId,
+          contactName: contactInfo.contactName,
+          subject: result.subject,
+          body: result.body,
+          channel: dto.channel,
+        });
+      } catch (error) {
+        this.logger.error(
+          `[BatchFollowUp] Error for ${contactInfo.contactName}: ${error.message}`,
+        );
+        results.push({
+          contactId: contactInfo.contactId,
+          contactName: contactInfo.contactName,
+          subject: undefined,
+          body: `Unable to generate message for ${contactInfo.contactName}. Please try again.`,
+          channel: dto.channel,
+        });
+      }
+    }
+
+    return { results };
   }
 }

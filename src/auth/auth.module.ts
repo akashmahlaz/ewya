@@ -13,10 +13,16 @@ import { UsersModule } from '../users/users.module';
     PassportModule,
     JwtModule.registerAsync({
       imports: [ConfigModule],
-      useFactory: async (configService: ConfigService) => ({
-        secret: configService.get('JWT_SECRET'),
-        signOptions: { expiresIn: configService.get('JWT_EXPIRES_IN') },
-      }),
+      useFactory: async (configService: ConfigService) => {
+        const secret = configService.get('JWT_SECRET');
+        if (!secret) {
+          console.warn('WARNING: JWT_SECRET not set. Using fallback for dev only!');
+        }
+        return {
+          secret: secret || 'sailors-platform-dev-secret-CHANGE-IN-PROD',
+          signOptions: { expiresIn: configService.get('JWT_EXPIRES_IN') || '7d' },
+        };
+      },
       inject: [ConfigService],
     }),
   ],

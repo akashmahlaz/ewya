@@ -11,13 +11,12 @@ export class AuthController {
   @Post('google')
   async googleAuth(@Body() googleAuthDto: GoogleAuthDto): Promise<AuthResponseDto> {
     this.logger.log(`Google auth request received. idToken length: ${googleAuthDto.idToken?.length || 0}`);
-    this.logger.log(`idToken starts with: ${googleAuthDto.idToken?.substring(0, 30)}...`);
     try {
       const result = await this.authService.googleLogin(googleAuthDto.idToken);
       this.logger.log(`Auth success for user: ${result.user.email}`);
       return result;
     } catch (error) {
-      this.logger.error(`Auth failed: ${error.message}`, error.stack);
+      this.logger.error(`Auth failed: ${error.message}`);
       throw error;
     }
   }
